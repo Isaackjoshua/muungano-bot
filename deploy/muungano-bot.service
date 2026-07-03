@@ -1,0 +1,25 @@
+[Unit]
+Description=Muungano WhatsApp Bot (FastAPI + Uvicorn)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust User/Group and WorkingDirectory to match your deployment.
+User=muungano
+Group=muungano
+WorkingDirectory=/opt/muungano-bot
+
+# API key (and any other secrets) live here, not in the unit file:
+#   echo 'ANTHROPIC_API_KEY=sk-ant-...' > /etc/muungano-bot.env
+#   chmod 600 /etc/muungano-bot.env
+EnvironmentFile=/etc/muungano-bot.env
+
+# Assumes a virtualenv at /opt/muungano-bot/.venv with requirements installed.
+ExecStart=/opt/muungano-bot/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

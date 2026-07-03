@@ -1,0 +1,13 @@
+# Runtime SQLite state — created on first request, never committed.
+quiz_state.db
+
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Test / tooling caches
+.pytest_cache/

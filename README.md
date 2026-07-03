@@ -3,8 +3,8 @@
 A WhatsApp bot (Swahili) for a Tanzanian government-run university innovation
 contest about the Union of Tanganyika and Zanzibar (*Muungano*). It runs on
 FastAPI behind a Twilio WhatsApp webhook, keeps per-user state in SQLite, and
-answers free-text questions with the Anthropic API — grounded strictly in a
-vetted knowledge base.
+answers free-text questions with Google's Gemini API (free tier) — grounded
+strictly in a vetted knowledge base.
 
 ## The three modes
 
@@ -29,10 +29,19 @@ context.
 
 ### Model
 
-Uses `claude-sonnet-5`. Sonnet 5 is the strong general-purpose Claude model —
-a good fit here for careful, instruction-following Swahili answers that must
-respect the "only answer from the reference document, stay neutral" rules,
-without the cost of the largest model.
+Uses `gemini-2.5-flash` (overridable via the `GEMINI_MODEL` env var). Gemini
+Flash is fast, capable enough for careful instruction-following Swahili answers
+that respect the "only answer from the reference document, stay neutral" rules,
+and — critically for this project — available on Google's **free tier**. That
+free tier is *rate-limited* (requests per minute / per day), **not**
+credit-limited: there is no trial credit to exhaust and no card required. Verify
+the current model ID and your live quota in Google AI Studio before deploying,
+as free-tier Flash limits have changed more than once.
+
+> **Free-tier data note:** on Google's free Gemini tier, prompts may be used by
+> Google to improve their models. That is an accepted trade-off for this
+> project's "no paid services" constraint — documented here so it's explicit,
+> not hidden.
 
 ## Local setup
 
@@ -43,9 +52,11 @@ cd muungano-bot
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# Provide your Anthropic key (either export it, or copy the example file):
+# Get a free Gemini API key from Google AI Studio (aistudio.google.com →
+# "Get API key"; no card required). Then provide it (export, or copy the
+# example file):
 cp .env.example .env      # then edit .env and paste your real key
-# export ANTHROPIC_API_KEY=sk-ant-...
+# export GEMINI_API_KEY=AIza...
 
 uvicorn app.main:app --reload
 ```
@@ -63,8 +74,8 @@ pip install pytest
 pytest -v
 ```
 
-The suite mocks the Anthropic client and isolates the database per test, so it
-needs **no** real Twilio or Anthropic credentials.
+The suite mocks the Gemini client and isolates the database per test, so it
+needs **no** real Twilio or Gemini credentials.
 
 ## Connecting the Twilio WhatsApp Sandbox
 
@@ -103,10 +114,10 @@ point the sandbox webhook at your deployed URL instead (e.g.
 Both options are scaffolded; pick one.
 
 - **Docker:** `docker build -t muungano-bot .` then
-  `docker run -p 8000:8000 -e ANTHROPIC_API_KEY=sk-ant-... muungano-bot`.
+  `docker run -p 8000:8000 -e GEMINI_API_KEY=AIza... muungano-bot`.
   Includes a `HEALTHCHECK` against `/health`.
 - **VPS + systemd:** see `deploy/muungano-bot.service`. Put the API key in
-  `/etc/muungano-bot.env` (`ANTHROPIC_API_KEY=...`, `chmod 600`), install the
+  `/etc/muungano-bot.env` (`GEMINI_API_KEY=...`, `chmod 600`), install the
   app under `/opt/muungano-bot` with a virtualenv, then
   `systemctl enable --now muungano-bot`.
 

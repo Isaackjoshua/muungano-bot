@@ -5,15 +5,16 @@
 # guard against specific bugs that were actually hit (see comments). Do not
 # delete a test because it "looks redundant".
 #
-# No real Twilio or Anthropic credentials are required: the Anthropic client
-# is mocked, and the API-key / missing-KB failure paths are exercised with
-# monkeypatch. Each test gets an isolated on-disk SQLite DB via the autouse
+# No real Twilio or Gemini credentials are required: the Gemini client is
+# mocked, and the API-key / rate-limit / missing-KB failure paths are exercised
+# with monkeypatch. Each test gets an isolated on-disk SQLite DB via the autouse
 # fixture below, so state never leaks between tests or between phone numbers.
 
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+from google.genai import errors as genai_errors
 
 from app import main
 
@@ -163,7 +164,7 @@ def test_two_phones_no_state_leak(client):
 
 
 def test_ask_mode_missing_api_key(client, monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     send(client, "hi")
     send(client, "1")                    # enter ask mode
     body = send(client, "Muungano ni nini?")
@@ -175,7 +176,7 @@ def test_ask_mode_missing_api_key(client, monkeypatch):
 
 
 def test_ask_mode_missing_knowledge_base(client, tmp_path, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setattr(main, "KB_PATH", tmp_path / "does_not_exist.md")
     send(client, "hi")
     send(client, "1")
@@ -183,32 +184,46 @@ def test_ask_mode_missing_knowledge_base(client, tmp_path, monkeypatch):
     assert "hitilafu ya kiufundi" in body
 
 
-# --- 11. ask_llm builds the correct request (mock client) ------------------
+# --- 11. ask_llm builds the correct Gemini request (mock client) -----------
 
 
 def test_ask_llm_request_shape():
-    class FakeBlock:
-        type = "text"
-
-        def __init__(self, text):
-            self.text = text
-
+    # Mimics google-genai: client.models.generate_content(...) -> obj.text
     fake = MagicMock()
-    fake.messages.create.return_value = MagicMock(content=[FakeBlock("jibu la mfano")])
+    fake.models.generate_content.return_value = MagicMock(text="jibu la mfano")
 
     out = main.ask_llm(fake, "Muungano ulianzishwa lini?")
     assert out == "jibu la mfano"
 
-    _, kwargs = fake.messages.create.call_args
-    assert kwargs["model"] == "claude-sonnet-5"
-    # Full knowledge base must be grounded into the system prompt.
-    assert main.load_knowledge_base() in kwargs["system"]
+    _, kwargs = fake.models.generate_content.call_args
+    assert kwargs["model"] == main.MODEL == "gemini-2.5-flash"
+    # Raw question passed through untouched.
+    assert kwargs["contents"] == "Muungano ulianzishwa lini?"
+    # Full knowledge base must be grounded into the system instruction.
+    assert main.load_knowledge_base() in kwargs["config"].system_instruction
     # Neutrality instruction must survive.
-    assert "USICHUKUE upande" in kwargs["system"]
-    # User question is passed through untouched.
-    assert kwargs["messages"] == [
-        {"role": "user", "content": "Muungano ulianzishwa lini?"}
-    ]
+    assert "USICHUKUE upande" in kwargs["config"].system_instruction
+
+
+# --- 11b. free-tier 429 rate limit gets its own retry message --------------
+
+
+def test_ask_mode_rate_limited_429(client, monkeypatch):
+    # A 429 is an expected, recoverable free-tier condition — it must produce
+    # the "watumiaji wengi" retry copy, NOT the generic technical-error copy.
+    fake = MagicMock()
+    fake.models.generate_content.side_effect = genai_errors.APIError(
+        429, {"error": {"message": "rate limited", "status": "RESOURCE_EXHAUSTED"}}
+    )
+    # Inject the fake as the cached client so get_client() returns it without
+    # needing a real key.
+    monkeypatch.setattr(main, "_client", fake)
+
+    send(client, "hi")
+    send(client, "1")
+    body = send(client, "Muungano ni nini?")
+    assert "watumiaji wengi" in body
+    assert "hitilafu ya kiufundi" not in body
 
 
 # --- 12. health check ------------------------------------------------------

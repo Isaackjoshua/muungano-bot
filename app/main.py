@@ -14,15 +14,18 @@
 # DB for a corpus this size — don't add that complexity unless the corpus
 # grows to the point it stops fitting comfortably in context.
 #
-# Requires an ANTHROPIC_API_KEY environment variable at deploy time.
-# Model: claude-sonnet-5 (see README.md for why).
+# Requires a GEMINI_API_KEY environment variable at deploy time (free
+# tier, no card required — see README.md). Model: gemini-2.5-flash,
+# overridable via GEMINI_MODEL env var.
 
 import os
 import re
 import sqlite3
 from pathlib import Path
 
-import anthropic
+from google import genai
+from google.genai import errors as genai_errors
+from google.genai import types as genai_types
 from fastapi import FastAPI, Form
 from fastapi.responses import Response
 from twilio.twiml.messaging_response import MessagingResponse
@@ -43,7 +46,13 @@ from app.quiz_data import QUESTIONS
 DB_PATH = Path(__file__).parent / "quiz_state.db"
 KB_PATH = Path(__file__).parent / "knowledge_base.md"
 GREETINGS = {"start", "hi", "hujambo", "habari", "mambo", "anza"}
-MODEL = "claude-sonnet-5"
+# Configurable via env var so a rate-limit or deprecation issue is a config
+# change, not a code change. gemini-2.5-flash is the current documented
+# stable model ID as of mid-2026 — verify this is still current in
+# Google AI Studio before deploying; free-tier RPM/RPD figures for Flash
+# have changed more than once recently, so check your live quota panel
+# rather than trusting any cached number, including this comment.
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 MAX_TOKENS = 400
 
 MENU_TEXT = (
@@ -83,7 +92,7 @@ HATI YA MAREJEO:
 app = FastAPI()
 
 _kb_cache: str | None = None
-_client: anthropic.Anthropic | None = None
+_client: genai.Client | None = None
 
 
 def load_knowledge_base() -> str:
@@ -93,26 +102,27 @@ def load_knowledge_base() -> str:
     return _kb_cache
 
 
-def get_client() -> anthropic.Anthropic:
+def get_client() -> genai.Client:
     global _client
     if _client is None:
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
-            raise RuntimeError("ANTHROPIC_API_KEY haijawekwa kwenye mazingira.")
-        _client = anthropic.Anthropic(api_key=api_key)
+            raise RuntimeError("GEMINI_API_KEY haijawekwa kwenye mazingira.")
+        _client = genai.Client(api_key=api_key)
     return _client
 
 
-def ask_llm(client: anthropic.Anthropic, question: str) -> str:
+def ask_llm(client: genai.Client, question: str) -> str:
     system = SYSTEM_PROMPT_TEMPLATE.format(knowledge_base=load_knowledge_base())
-    resp = client.messages.create(
+    resp = client.models.generate_content(
         model=MODEL,
-        max_tokens=MAX_TOKENS,
-        system=system,
-        messages=[{"role": "user", "content": question}],
+        contents=question,
+        config=genai_types.GenerateContentConfig(
+            system_instruction=system,
+            max_output_tokens=MAX_TOKENS,
+        ),
     )
-    parts = [b.text for b in resp.content if getattr(b, "type", None) == "text"]
-    return "\n".join(parts).strip() or "Samahani, sikuweza kupata jibu. Jaribu tena."
+    return (resp.text or "").strip() or "Samahani, sikuweza kupata jibu. Jaribu tena."
 
 
 # --- persistence -----------------------------------------------------------
@@ -268,8 +278,14 @@ async def whatsapp_webhook(Body: str = Form(...), From: str = Form(...)):
             answer = ask_llm(get_client(), raw)
         except RuntimeError as exc:
             answer = f"Samahani, huduma ya maswali haipo kwa sasa ({exc})"
-        except anthropic.APIError:
-            answer = "Samahani, kuna hitilafu ya kiufundi. Jaribu tena baadaye."
+        except genai_errors.APIError as exc:
+            if getattr(exc, "code", None) == 429:
+                # Expected on a free tier under bursty traffic — tell the
+                # user to retry rather than a generic technical-error
+                # message, since this isn't really a fault.
+                answer = "Samahani, huduma ina watumiaji wengi kwa sasa. Tafadhali jaribu tena baada ya dakika chache."
+            else:
+                answer = "Samahani, kuna hitilafu ya kiufundi. Jaribu tena baadaye."
         except Exception as exc:  # noqa: BLE001 - last line of defense so a
             # deploy mistake (e.g. missing knowledge_base.md) never surfaces
             # as a hard 500 to a WhatsApp user; log it so it's actually

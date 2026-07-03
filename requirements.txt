@@ -2,5 +2,5 @@ fastapi
 uvicorn[standard]
 twilio
 python-multipart
-anthropic
+google-genai
 python-dotenv

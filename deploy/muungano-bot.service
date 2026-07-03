@@ -11,7 +11,7 @@ Group=muungano
 WorkingDirectory=/opt/muungano-bot
 
 # API key (and any other secrets) live here, not in the unit file:
-#   echo 'ANTHROPIC_API_KEY=sk-ant-...' > /etc/muungano-bot.env
+#   echo 'GEMINI_API_KEY=AIza...' > /etc/muungano-bot.env
 #   chmod 600 /etc/muungano-bot.env
 EnvironmentFile=/etc/muungano-bot.env
 

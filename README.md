@@ -109,23 +109,77 @@ point the sandbox webhook at your deployed URL instead (e.g.
 > inactivity. If the bot goes quiet, re-send the `join <two-words>` code to
 > reconnect before testing again.
 
-## Deployment
+## The two WhatsApp channels
 
-Both options are scaffolded; pick one.
+The bot serves the **same** conversation logic (`process_message`) over two
+independent webhooks — pick whichever channel you connect:
+
+| Channel | Endpoint | Use it for |
+| --- | --- | --- |
+| **Twilio** | `POST /webhook` | Quick sandbox demos (`join` opt-in, expires 72h). |
+| **Meta Cloud API** | `GET`/`POST /meta/webhook` | Free **production** deployment (see below). |
+
+You don't have to choose at the code level — both are always mounted. Only the
+Twilio path needs a reply in the HTTP response (TwiML); the Meta path returns
+`200` immediately and sends its reply back out via the Graph API.
+
+## Deploying live on WhatsApp for free (Meta Cloud API)
+
+Meta's WhatsApp **Cloud API** is the free production path: Meta hosts the API,
+and *service conversations* — where the user messages first and the bot replies
+within 24h, which is all this bot ever does — are free and unlimited. (Twilio's
+*production* WhatsApp, unlike its sandbox, charges per message, so it is not the
+free route.)
+
+1. In **Meta for Developers** → create an app → add the **WhatsApp** product.
+   You get a free **test number** immediately (can message up to 5 recipients
+   without business verification — enough for a real demo).
+2. Copy these into the environment (see `.env.example`):
+   - `META_PHONE_NUMBER_ID` — the sender's phone-number ID (not the number).
+   - `META_ACCESS_TOKEN` — a token that can call the Graph API to send messages
+     (use a long-lived / system-user token for anything beyond testing).
+   - `META_VERIFY_TOKEN` — any random string you invent.
+3. Deploy the app to a public HTTPS host (see **Hosting** below).
+4. In the app's **WhatsApp → Configuration → Webhook**, set the callback URL to
+   `https://<your-host>/meta/webhook`, paste the same `META_VERIFY_TOKEN`, and
+   **Verify and save** (this triggers the `GET` handshake the bot answers).
+   Then **subscribe** the webhook to the `messages` field.
+5. Message your number from WhatsApp — you should get the menu back.
+   To open it to the general public, complete Meta **Business Verification**
+   (free) and register a production number.
+
+> **Number note:** a number currently active in the WhatsApp Business *app*
+> can't *simultaneously* run on the Cloud *API* — migrate it (it leaves the
+> app) or use a different / the free test number.
+
+## Hosting (always-on, free options)
+
+- **Oracle Cloud "Always Free" VM** — genuinely free forever and always-on (no
+  cold starts). Use `deploy/muungano-bot.service` (below). Best fit for a
+  permanent deployment.
+- **Render free tier** — easiest click-deploy; sleeps after inactivity (~cold
+  start on the first message, which Meta/Twilio retry through).
+- **Google Cloud Run** — uses the `Dockerfile`, generous free tier, scales to
+  zero (needs a card on file even while free).
+
+Both scaffolds below work with either WhatsApp channel:
 
 - **Docker:** `docker build -t muungano-bot .` then
   `docker run -p 8000:8000 -e GEMINI_API_KEY=AIza... muungano-bot`.
-  Includes a `HEALTHCHECK` against `/health`.
-- **VPS + systemd:** see `deploy/muungano-bot.service`. Put the API key in
-  `/etc/muungano-bot.env` (`GEMINI_API_KEY=...`, `chmod 600`), install the
-  app under `/opt/muungano-bot` with a virtualenv, then
-  `systemctl enable --now muungano-bot`.
+  Includes a `HEALTHCHECK` against `/health`. Pass the `META_*` vars with `-e`
+  too if serving the Meta channel.
+- **VPS + systemd:** see `deploy/muungano-bot.service`. Put secrets in
+  `/etc/muungano-bot.env` (`GEMINI_API_KEY=...`, plus the `META_*` vars if used;
+  `chmod 600`), install the app under `/opt/muungano-bot` with a virtualenv,
+  then `systemctl enable --now muungano-bot`.
 
 ## Known limitations
 
-- **Twilio Sandbox, not production.** This uses the WhatsApp Sandbox, which
-  requires the `join` opt-in and expires after 72h of inactivity. Going to
-  production needs an approved WhatsApp Business API sender.
+- **Twilio is sandbox-only here.** The Twilio channel targets the WhatsApp
+  Sandbox (`join` opt-in, expires after 72h) — fine for demos. For a free
+  *production* deployment use the **Meta Cloud API** channel instead (see
+  "Deploying live on WhatsApp for free"); reaching the general public still
+  requires free Meta Business Verification.
 - **Starter content only.** 5 quiz questions and 10 facts, deliberately
   limited to uncontroversial, well-documented historical material. Verify
   every fact against a primary/official source before final submission.

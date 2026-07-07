@@ -233,3 +233,195 @@ def test_health(client):
     resp = client.get("/health")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
+
+
+# --- Meta WhatsApp Cloud API channel --------------------------------------
+#
+# The Meta path shares ALL business logic with Twilio via process_message;
+# these tests exercise the channel adapter: the GET verification handshake,
+# JSON parsing, phone-key normalisation, and that the reply is dispatched via
+# send_whatsapp_message (mocked — no network, no real Graph API token).
+
+WA_ID = "255700000001"                      # Meta delivers digits only...
+META_PHONE_KEY = "whatsapp:+255700000001"   # ...we normalise to Twilio's form
+
+
+def _meta_text_payload(text, wa_id=WA_ID):
+    """Build the nested JSON Meta sends for one inbound text message."""
+    return {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "WABA_ID",
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {"phone_number_id": "PNID"},
+                            "messages": [
+                                {
+                                    "from": wa_id,
+                                    "id": "wamid.TEST",
+                                    "timestamp": "0",
+                                    "type": "text",
+                                    "text": {"body": text},
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+
+@pytest.fixture
+def capture_send(monkeypatch):
+    """Replace the Graph API sender with a mock that records (to, body)."""
+    fake = MagicMock()
+    monkeypatch.setattr(main, "send_whatsapp_message", fake)
+    return fake
+
+
+# --- M1. verification handshake succeeds with the right token --------------
+
+
+def test_meta_verify_handshake_ok(client, monkeypatch):
+    monkeypatch.setattr(main, "META_VERIFY_TOKEN", "secret-tok")
+    resp = client.get(
+        "/meta/webhook",
+        params={
+            "hub.mode": "subscribe",
+            "hub.verify_token": "secret-tok",
+            "hub.challenge": "1234567890",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.text == "1234567890"     # echoed back verbatim
+
+
+# --- M2. verification is rejected on a wrong token -------------------------
+
+
+def test_meta_verify_handshake_bad_token(client, monkeypatch):
+    monkeypatch.setattr(main, "META_VERIFY_TOKEN", "secret-tok")
+    resp = client.get(
+        "/meta/webhook",
+        params={
+            "hub.mode": "subscribe",
+            "hub.verify_token": "WRONG",
+            "hub.challenge": "1234567890",
+        },
+    )
+    assert resp.status_code == 403
+
+
+# --- M3. inbound text runs shared logic and dispatches a reply -------------
+
+
+def test_meta_inbound_text_greeting(client, capture_send):
+    resp = client.post("/meta/webhook", json=_meta_text_payload("hi"))
+    assert resp.status_code == 200
+
+    capture_send.assert_called_once()
+    to, body = capture_send.call_args.args
+    assert to == WA_ID                    # raw wa_id used for sending
+    assert "Chagua namba" in body         # the menu, from process_message
+
+
+# --- M4. Meta and Twilio share state via the normalised phone key ----------
+
+
+def test_meta_shares_state_with_process_message(client, capture_send):
+    # Choosing "2" over Meta must start the quiz for the normalised key,
+    # proving the wa_id -> whatsapp:+<id> mapping reaches the same state row.
+    client.post("/meta/webhook", json=_meta_text_payload("2"))
+    assert main.get_state(META_PHONE_KEY)["mode"] == "quiz"
+    _, body = capture_send.call_args.args
+    assert "Swali 1/5" in body
+
+
+# --- M5. delivery-status callbacks are ignored (no reply sent) -------------
+
+
+def test_meta_status_callback_ignored(client, capture_send):
+    status_event = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "WABA_ID",
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {"phone_number_id": "PNID"},
+                            "statuses": [
+                                {"id": "wamid.X", "status": "delivered"}
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    resp = client.post("/meta/webhook", json=status_event)
+    assert resp.status_code == 200
+    capture_send.assert_not_called()
+
+
+# --- M6. non-text messages get a gentle "text only" nudge ------------------
+
+
+def test_meta_non_text_message(client, capture_send):
+    payload = _meta_text_payload("ignored")
+    msg = payload["entry"][0]["changes"][0]["value"]["messages"][0]
+    msg["type"] = "image"
+    del msg["text"]
+    msg["image"] = {"id": "media123"}
+
+    client.post("/meta/webhook", json=payload)
+    to, body = capture_send.call_args.args
+    assert to == WA_ID
+    assert "maandishi tu" in body         # "I understand text only"
+
+
+# --- M7. send_whatsapp_message posts the correct Graph API request ---------
+
+
+def test_send_whatsapp_message_shape(monkeypatch):
+    monkeypatch.setattr(main, "META_ACCESS_TOKEN", "tok-abc")
+    monkeypatch.setattr(main, "META_PHONE_NUMBER_ID", "PNID99")
+    monkeypatch.setattr(main, "GRAPH_API_VERSION", "v22.0")
+
+    calls = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        calls["url"] = url
+        calls["json"] = json
+        calls["headers"] = headers
+        return MagicMock(status_code=200, text="ok")
+
+    monkeypatch.setattr(main.httpx, "post", fake_post)
+
+    main.send_whatsapp_message("255700000001", "Habari!")
+
+    assert calls["url"] == "https://graph.facebook.com/v22.0/PNID99/messages"
+    assert calls["headers"]["Authorization"] == "Bearer tok-abc"
+    assert calls["json"]["to"] == "255700000001"
+    assert calls["json"]["text"]["body"] == "Habari!"
+    assert calls["json"]["messaging_product"] == "whatsapp"
+
+
+# --- M8. send is a safe no-op when Meta creds are absent -------------------
+
+
+def test_send_whatsapp_message_no_creds(monkeypatch):
+    monkeypatch.setattr(main, "META_ACCESS_TOKEN", None)
+    monkeypatch.setattr(main, "META_PHONE_NUMBER_ID", None)
+    # Must not raise and must not attempt a network call.
+    boom = MagicMock(side_effect=AssertionError("should not POST"))
+    monkeypatch.setattr(main.httpx, "post", boom)
+    main.send_whatsapp_message("255700000001", "hi")
+    boom.assert_not_called()

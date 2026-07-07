@@ -4,3 +4,4 @@ twilio
 python-multipart
 google-genai
 python-dotenv
+httpx

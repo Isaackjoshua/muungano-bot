@@ -23,11 +23,12 @@ import re
 import sqlite3
 from pathlib import Path
 
+import httpx
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types as genai_types
-from fastapi import FastAPI, Form
-from fastapi.responses import Response
+from fastapi import BackgroundTasks, FastAPI, Form, Request
+from fastapi.responses import PlainTextResponse, Response
 from twilio.twiml.messaging_response import MessagingResponse
 
 # Optional: load a local .env for development convenience. Production
@@ -58,6 +59,24 @@ MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 # normal short answer finish comfortably while still fitting a WhatsApp
 # message; the prompt (rule 4) keeps answers brief so we rarely approach it.
 MAX_TOKENS = 800
+
+# --- Meta WhatsApp Cloud API config ------------------------------------
+# The bot speaks two channels that share ALL business logic (process_message):
+#   * Twilio  -> POST /webhook       (form-encoded in, TwiML XML out)
+#   * Meta    -> GET/POST /meta/webhook  (JSON in, reply sent via Graph API)
+# Meta's Cloud API is the free production path (see README). These are read
+# from the environment; when unset, the Meta endpoints simply stay dormant
+# and the Twilio path is unaffected.
+#
+#   META_VERIFY_TOKEN     - arbitrary secret; must match the value you type
+#                           into the Meta dashboard's webhook "Verify token".
+#   META_ACCESS_TOKEN     - token used to call the Graph API to SEND replies.
+#   META_PHONE_NUMBER_ID  - the sender phone-number ID (NOT the phone number).
+#   GRAPH_API_VERSION     - Graph API version segment, e.g. "v22.0".
+META_VERIFY_TOKEN = os.environ.get("META_VERIFY_TOKEN")
+META_ACCESS_TOKEN = os.environ.get("META_ACCESS_TOKEN")
+META_PHONE_NUMBER_ID = os.environ.get("META_PHONE_NUMBER_ID")
+GRAPH_API_VERSION = os.environ.get("GRAPH_API_VERSION", "v22.0")
 
 MENU_TEXT = (
     "Karibu kwenye *Elimu ya Muungano*! 🇹🇿\n\n"
@@ -226,57 +245,50 @@ def handle_quiz_turn(phone: str, state: dict, raw: str) -> str:
     return f"{feedback}\n\n{format_question(q_idx)}"
 
 
-# --- webhook -----------------------------------------------------------
+# --- shared conversation logic -----------------------------------------
+#
+# process_message is the single source of truth for what the bot does with an
+# inbound text message. It is channel-agnostic: it takes a stable per-user
+# key (`phone`) and the raw message text, mutates state, and returns the
+# reply as plain text. Both the Twilio and Meta webhooks call it and only
+# differ in how they receive the text and deliver the reply.
 
 
-def _xml(resp: MessagingResponse) -> Response:
-    return Response(content=str(resp), media_type="application/xml")
-
-
-@app.post("/webhook")
-async def whatsapp_webhook(Body: str = Form(...), From: str = Form(...)):
-    phone = From
-    raw = Body.strip()
+def process_message(phone: str, raw: str) -> str:
+    raw = raw.strip()
     lowered = raw.lower()
-
-    resp = MessagingResponse()
-    msg = resp.message()
 
     # Global override: MENU always returns to the main menu, regardless
     # of what mode the user was in.
     if lowered == "menu":
         set_state(phone, mode="menu")
-        msg.body(MENU_TEXT)
-        return _xml(resp)
+        return MENU_TEXT
 
     state = get_state(phone)
 
     if state["mode"] == "menu":
         if lowered in GREETINGS:
-            msg.body(MENU_TEXT)
-            return _xml(resp)
+            return MENU_TEXT
 
-        choice = raw.strip()
+        choice = raw
         if choice == "1":
             set_state(phone, mode="ask")
-            msg.body("Uliza swali lolote kuhusu Muungano, kwa Kiswahili.\n(Andika MENU kurudi.)")
+            return "Uliza swali lolote kuhusu Muungano, kwa Kiswahili.\n(Andika MENU kurudi.)"
         elif choice == "2":
             set_state(phone, mode="quiz", current_question=0, score=0)
-            msg.body("Karibu kwenye Quiz! Jibu kwa A, B, C au D.\n\n" + format_question(0))
+            return "Karibu kwenye Quiz! Jibu kwa A, B, C au D.\n\n" + format_question(0)
         elif choice == "3":
             idx = state["fact_index"] % len(FACTS)
             set_state(phone, fact_index=state["fact_index"] + 1)
-            msg.body(
+            return (
                 f"💡 Je, Wajua?\n\n{FACTS[idx]}\n\n"
                 "Andika 3 kwa ukweli mwingine, au MENU kurudi kwenye menyu."
             )
         else:
-            msg.body("Samahani, sikuelewa.\n\n" + MENU_TEXT)
-        return _xml(resp)
+            return "Samahani, sikuelewa.\n\n" + MENU_TEXT
 
     if state["mode"] == "quiz":
-        msg.body(handle_quiz_turn(phone, state, raw))
-        return _xml(resp)
+        return handle_quiz_turn(phone, state, raw)
 
     if state["mode"] == "ask":
         try:
@@ -297,13 +309,105 @@ async def whatsapp_webhook(Body: str = Form(...), From: str = Form(...)):
             # visible when running the server.
             print(f"[ask mode] unexpected error: {exc!r}")
             answer = "Samahani, kuna hitilafu ya kiufundi. Jaribu tena baadaye."
-        msg.body(answer + "\n\n(Andika MENU kurudi.)")
-        return _xml(resp)
+        return answer + "\n\n(Andika MENU kurudi.)"
 
     # Unknown mode fallback — shouldn't happen, but don't dead-end the user.
     set_state(phone, mode="menu")
-    msg.body(MENU_TEXT)
+    return MENU_TEXT
+
+
+# --- Twilio webhook ----------------------------------------------------
+#
+# Twilio delivers the message as form fields and expects a TwiML reply in the
+# HTTP response body.
+
+
+def _xml(resp: MessagingResponse) -> Response:
+    return Response(content=str(resp), media_type="application/xml")
+
+
+@app.post("/webhook")
+async def twilio_webhook(Body: str = Form(...), From: str = Form(...)):
+    reply = process_message(From, Body)
+    resp = MessagingResponse()
+    resp.message().body(reply)
     return _xml(resp)
+
+
+# --- Meta WhatsApp Cloud API webhook -----------------------------------
+#
+# Unlike Twilio, Meta does NOT accept the reply in the webhook response.
+# The flow is: Meta POSTs the inbound message as JSON, we return 200 fast,
+# then send the reply out-of-band by calling the Graph API. A GET on the
+# same path performs Meta's one-time subscription handshake.
+
+
+def send_whatsapp_message(to: str, body: str) -> None:
+    """Send a text reply to a user via the Meta Graph API.
+
+    `to` is the raw wa_id (digits only, as Meta delivers it). Failures are
+    logged, not raised — this runs in a background task after we've already
+    returned 200 to Meta, so there's no response left to fail.
+    """
+    if not (META_ACCESS_TOKEN and META_PHONE_NUMBER_ID):
+        print("[meta] META_ACCESS_TOKEN / META_PHONE_NUMBER_ID not set; cannot send reply")
+        return
+    url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{META_PHONE_NUMBER_ID}/messages"
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "text",
+        "text": {"body": body},
+    }
+    headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}"}
+    try:
+        resp = httpx.post(url, json=payload, headers=headers, timeout=15)
+        if resp.status_code >= 400:
+            print(f"[meta] send failed {resp.status_code}: {resp.text}")
+    except Exception as exc:  # noqa: BLE001 - never let a send error crash the worker
+        print(f"[meta] send error: {exc!r}")
+
+
+@app.get("/meta/webhook")
+async def meta_verify(request: Request):
+    # Meta calls this once when you save the webhook: echo hub.challenge back
+    # verbatim, but only if the verify token matches ours.
+    params = request.query_params
+    if (
+        params.get("hub.mode") == "subscribe"
+        and META_VERIFY_TOKEN
+        and params.get("hub.verify_token") == META_VERIFY_TOKEN
+    ):
+        return PlainTextResponse(params.get("hub.challenge", ""))
+    return PlainTextResponse("Verification failed", status_code=403)
+
+
+@app.post("/meta/webhook")
+async def meta_webhook(request: Request, background_tasks: BackgroundTasks):
+    data = await request.json()
+    # Meta batches events under entry[].changes[].value. A single change may
+    # carry inbound messages (what we act on) OR delivery/read statuses
+    # (value.statuses, which we ignore since there is no "messages" key).
+    for entry in data.get("entry", []):
+        for change in entry.get("changes", []):
+            value = change.get("value", {})
+            for message in value.get("messages", []):
+                wa_id = message.get("from")
+                if not wa_id:
+                    continue
+                # Normalise to Twilio's key format so the same real number
+                # maps to the same stored state regardless of channel.
+                phone = f"whatsapp:+{wa_id}"
+                if message.get("type") == "text":
+                    reply = process_message(phone, message.get("text", {}).get("body", ""))
+                else:
+                    reply = (
+                        "Samahani, kwa sasa naelewa ujumbe wa maandishi tu. "
+                        "Tafadhali andika swali au namba (1, 2, 3), au 'MENU'."
+                    )
+                # Return 200 to Meta immediately; deliver the reply after.
+                background_tasks.add_task(send_whatsapp_message, wa_id, reply)
+    return {"status": "ok"}
 
 
 @app.get("/health")

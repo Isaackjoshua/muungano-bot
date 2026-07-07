@@ -53,7 +53,11 @@ GREETINGS = {"start", "hi", "hujambo", "habari", "mambo", "anza"}
 # have changed more than once recently, so check your live quota panel
 # rather than trusting any cached number, including this comment.
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-MAX_TOKENS = 400
+# Raised from 400 after a live WhatsApp test truncated a real answer
+# mid-word: a multi-point reply started but ran out of budget. 800 lets a
+# normal short answer finish comfortably while still fitting a WhatsApp
+# message; the prompt (rule 4) keeps answers brief so we rarely approach it.
+MAX_TOKENS = 800
 
 MENU_TEXT = (
     "Karibu kwenye *Elimu ya Muungano*! 🇹🇿\n\n"
@@ -80,8 +84,9 @@ malalamiko kuhusu muundo wa Muungano, hisia za baadhi ya Wazanzibari, \
 au siasa za sasa), USICHUKUE upande wowote. Sema tu kwamba ni mada \
 inayojadiliwa na wataalamu na wanasiasa mbalimbali, bila kutoa maoni \
 yako mwenyewe, na mshauri kutafuta vyanzo rasmi zaidi.
-4. Jibu kwa Kiswahili fasaha, kifupi (sentensi 2-5), kinachofaa kwa \
-ujumbe wa WhatsApp.
+4. Jibu kwa Kiswahili fasaha, kwa ufupi (sentensi 2-5) katika aya moja \
+fupi inayofaa kwa ujumbe wa WhatsApp. EPUKA orodha ndefu za vidoti; \
+kamilisha jibu lako kila wakati — usiache sentensi katikati.
 5. Usijibu maswali yasiyohusiana kabisa na Muungano wa Tanzania — \
 mkumbushe mtumiaji kwa heshima kwamba wewe ni bot ya Muungano pekee.
 

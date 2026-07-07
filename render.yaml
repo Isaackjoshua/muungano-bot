@@ -1,0 +1,33 @@
+# render.yaml — Render Blueprint for the Muungano WhatsApp bot.
+#
+# Deploy: push this repo to GitHub, then in Render → "New +" → "Blueprint" and
+# point it at the repo. Render builds the Dockerfile and serves the app over
+# HTTPS at https://<service-name>.onrender.com — that valid cert is what makes
+# it usable as a Meta WhatsApp Cloud API webhook (Callback URL:
+# https://<service-name>.onrender.com/meta/webhook).
+#
+# The secrets below use `sync: false`, so Render prompts you for each value on
+# first deploy and stores them encrypted — they never live in the repo. Fill in
+# GEMINI_API_KEY plus the three META_* values from the Meta API Setup screen.
+#
+# Free plan note: the service sleeps after ~15 min idle and cold-starts on the
+# next request (~50s). Meta and Twilio both retry, so messages still get
+# through; the first one after a nap is just slow.
+
+services:
+  - type: web
+    name: muungano-bot
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: META_VERIFY_TOKEN
+        sync: false
+      - key: META_ACCESS_TOKEN
+        sync: false
+      - key: META_PHONE_NUMBER_ID
+        sync: false
+      - key: GRAPH_API_VERSION
+        value: v22.0

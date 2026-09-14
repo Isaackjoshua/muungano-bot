@@ -4,7 +4,7 @@ A WhatsApp bot (Swahili) for a Tanzanian government-run university innovation
 contest about the Union of Tanganyika and Zanzibar (*Muungano*). It runs on
 FastAPI behind a Twilio WhatsApp webhook, keeps per-user state in SQLite, and
 answers free-text questions with Google's Gemini API (free tier) — grounded
-strictly in a vetted knowledge base.
+strictly in a vetted knowledge base.,
 
 ## The three modes
 
